@@ -38,6 +38,10 @@ h1{font-size:1.5rem;font-weight:700;margin-bottom:4px}
 .chart-title{font-size:1rem;font-weight:600;margin-bottom:4px}
 .chart-desc{font-size:.78rem;color:#aaa;margin-bottom:14px}
 .chart-box{position:relative;width:100%;height:400px}
+@media(max-width:768px){
+  body{padding:20px 12px 40px}
+  .theme-toggle{float:none;margin-top:0;margin-bottom:12px}
+}
 .theme-toggle{float:right;margin-top:-26px;display:inline-flex;border:1px solid #ddd;border-radius:6px;overflow:hidden}
 .theme-toggle button{padding:5px 14px;font-size:.75rem;border:none;background:#fff;color:#999;cursor:pointer;transition:all .15s}
 .theme-toggle button.active{background:#111;color:#fff}
@@ -137,18 +141,19 @@ function makeChart(canvasId, models){
   const labels = sorted.map(m=>m[0]);
   const scores = sorted.map(m=>m[1]);
   const colors = sorted.map((m,i)=>getModelColor(m[0],i));
-  const yMax = Math.ceil(Math.max(...scores)/10)*10;
+  const isMobile = window.innerWidth <= 768;
 
   const chart = new Chart(ctx, {
     type:'bar',
-    data:{ labels, datasets:[{ data:scores, backgroundColor:colors, borderRadius:4, borderSkipped:false, maxBarThickness:36 }] },
+    data:{ labels, datasets:[{ data:scores, backgroundColor:colors, borderRadius:4, borderSkipped:false }] },
     options:{
+      indexAxis: isMobile ? 'y' : 'x',
       responsive:true, maintainAspectRatio:false,
       layout:{ padding:{ top:8, right:12 } },
       plugins:{ legend:{display:false}, tooltip:{ backgroundColor:'#111', titleFont:{size:12}, bodyFont:{size:12}, callbacks:{ title:i=>labels[i[0].dataIndex], label:c=>` ${scores[c.dataIndex]}` } } },
       scales:{
-        x:{ grid:{display:false}, ticks:{color:'#555',font:{size:10},maxRotation:45,minRotation:25}, border:{color:'#ddd'} },
-        y:{ beginAtZero:true, suggestedMax:yMax, grid:{color:'#f0f0f0',lineWidth:1}, ticks:{color:'#999',font:{size:10},padding:4,stepSize:10,callback:v=>v}, border:{display:false} }
+        x:{ grid:{color:'#f0f0f0',lineWidth:1}, ticks:{color:'#999',font:{size:isMobile?9:10},padding:4}, border:{display:false} },
+        y:{ grid:{display:!isMobile}, ticks:{color:'#555',font:{size:10},maxRotation:0,padding:4}, border:{color:isMobile?'transparent':'#ddd'} }
       }
     }
   });
@@ -182,7 +187,9 @@ function render(data){
     const toggle = idx === 0
       ? `<div class="theme-toggle"><button data-theme="gradient">渐变色</button><button data-theme="brand" class="active">品牌色</button></div>`
       : '';
-    section.innerHTML = `${toggle}<div class="chart-title">${bench.label}</div>${desc?`<div class="chart-desc">${desc}</div>`:''}<div class="chart-box"><canvas id="${id}"></canvas></div>`;
+    const isMobile = window.innerWidth <= 768;
+    const boxHeight = isMobile ? Math.max(400, bench.models.length * 34 + 30) : 400;
+    section.innerHTML = `${toggle}<div class="chart-title">${bench.label}</div>${desc?`<div class="chart-desc">${desc}</div>`:''}<div class="chart-box" style="height:${boxHeight}px"><canvas id="${id}"></canvas></div>`;
     container.appendChild(section);
     requestAnimationFrame(() => makeChart(id, bench.models));
   });
