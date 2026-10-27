@@ -38,6 +38,7 @@ h1{font-size:1.5rem;font-weight:700;margin-bottom:4px}
 .chart-title{font-size:1rem;font-weight:600;margin-bottom:4px}
 .chart-desc{font-size:.78rem;color:#aaa;margin-bottom:14px}
 .chart-box{position:relative;width:100%;height:400px}
+.chart-box canvas{display:block;width:100%;height:100%}
 @media(max-width:768px){
   body{padding:20px 12px 40px}
   .theme-toggle{float:none;margin-top:0;margin-bottom:12px}
@@ -51,35 +52,21 @@ h1{font-size:1.5rem;font-weight:700;margin-bottom:4px}
 @keyframes spin{to{transform:rotate(360deg)}}
 footer{text-align:center;color:#ccc;font-size:.72rem;margin-top:40px}
 footer a{color:#aaa}
+.empty-state{background:#fafafa;border:1px dashed #ddd;border-radius:6px;padding:24px;color:#888;font-size:.8rem}
+@media(max-width:768px){.theme-toggle{float:none;margin:0 0 12px}.chart-title{line-height:1.6}}
 </style>
 </head>
 <body>
 
 <h1>LLM Benchmark Rankings</h1>
 <div class="sub" id="subtitle"></div>
-<div class="status-bar" id="statusBar"></div>
 <div id="content"><div class="loading-box"><div class="spinner"></div>正在获取数据...</div></div>
-<footer>数据源：<a href="https://benchlm.ai" target="_blank">BenchLM.ai</a> · 每日自动刷新</footer>
+<footer>数据源：<a href="https://benchlm.ai/data" target="_blank" rel="noopener noreferrer">BenchLM.ai</a> · <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener noreferrer">CC BY-NC 4.0</a> · 每日自动刷新</footer>
 
 <script>
-const DISPLAY_ORDER = [
-  'Overall','ARC-AGI-2','Humanity\'s Last Exam','MMLU-Pro',
-  'SWE-bench Verified','Terminal-Bench','SciCode',
-  'OfficeQA Pro','MMMU','IFBench',
-];
-
-const DESCRIPTIONS = {
-  'Overall':'综合加权评分，覆盖全部基准',
-  'ARC-AGI-2':'抽象推理视觉谜题，公认最难推理基准',
-  "Humanity's Last Exam":'跨学科极难题，专为击溃前沿模型设计',
-  'MMLU-Pro':'升级版 MMLU，57 学科多选题，更难更具区分度',
-  'SWE-bench Verified':'真实 GitHub issue 修复，衡量工程编码能力',
-  'Terminal-Bench':'终端命令行任务，考察 Agent 操作系统能力',
-  'SciCode':'科学计算编程，需要科研知识 + 代码能力',
-  'OfficeQA Pro':'办公文档 / 表格 / 图表推理，企业场景',
-  'MMMU':'专家级多模态理解，图文结合推理',
-  'IFBench':'复杂指令遵循，考察格式 / 约束 / 细节控制',
-};
+function escapeHtml(value){
+  return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 
 // ── Gradient palette (original v1) ─────────────────────────
 const GRADIENT = [
@@ -109,11 +96,61 @@ const BRAND = {
   'Microsoft':'#88B8E0',
 };
 
-let charts = [];
+const charts = new Map();
+const chartModels = new Map();
+const visibleCharts = new Set();
+const pendingCharts = new Set();
+const animatedCharts = new Set();
+let chartObserver;
+let renderFrame = null;
 let currentTheme = 'brand';
 let cachedData = [];
 
-function destroyCharts(){ charts.forEach(c=>c.destroy()); charts=[]; }
+function releaseChart(id){
+  pendingCharts.delete(id);
+  const chart = charts.get(id);
+  if(!chart) return;
+  chart.destroy();
+  charts.delete(id);
+  // Release the backing bitmap while the fixed-height box preserves scroll position.
+  const canvas = document.getElementById(id);
+  if(canvas){ canvas.width = 0; canvas.height = 0; }
+}
+
+function destroyCharts(){
+  if(chartObserver) chartObserver.disconnect();
+  if(renderFrame !== null) cancelAnimationFrame(renderFrame);
+  renderFrame = null;
+  pendingCharts.clear();
+  visibleCharts.clear();
+  for(const id of charts.keys()) releaseChart(id);
+  chartModels.clear();
+  animatedCharts.clear();
+}
+
+function queueChart(id){
+  pendingCharts.add(id);
+  if(renderFrame !== null) return;
+  renderFrame = requestAnimationFrame(drawNextChart);
+}
+
+function drawNextChart(){
+  renderFrame = null;
+  const id = pendingCharts.values().next().value;
+  if(id === undefined) return;
+  pendingCharts.delete(id);
+  if(visibleCharts.has(id)){
+    const chart = charts.get(id);
+    if(chart){
+      chart.data.datasets[0].backgroundColor = chart.data.labels.map((name, i) => getModelColor(name, i));
+      chart.update('none');
+    } else {
+      makeChart(id, chartModels.get(id));
+    }
+  }
+  // Spread construction and palette updates across frames, including fast scrolling.
+  if(pendingCharts.size) renderFrame = requestAnimationFrame(drawNextChart);
+}
 
 function getModelColor(name, idx){
   if(currentTheme==='gradient') return GRADIENT[idx % GRADIENT.length];
@@ -136,7 +173,9 @@ function getModelColor(name, idx){
 }
 
 function makeChart(canvasId, models){
-  const ctx = document.getElementById(canvasId).getContext('2d');
+  const canvas = document.getElementById(canvasId);
+  if(!canvas || !models?.length) return;
+  const ctx = canvas.getContext('2d');
   const sorted = [...models].sort((a,b)=>b[1]-a[1]);
   const labels = sorted.map(m=>m[0]);
   const scores = sorted.map(m=>m[1]);
@@ -149,15 +188,20 @@ function makeChart(canvasId, models){
     options:{
       indexAxis: isMobile ? 'y' : 'x',
       responsive:true, maintainAspectRatio:false,
+      animation:animatedCharts.has(canvasId) ? false : {duration:1000, easing:'easeOutQuart'},
+      devicePixelRatio:Math.min(window.devicePixelRatio || 1, 1.5),
+      resizeDelay:150,
+      events:['mousemove','mouseout','click','touchstart'],
       layout:{ padding:{ top:8, right:12 } },
-      plugins:{ legend:{display:false}, tooltip:{ backgroundColor:'#111', titleFont:{size:12}, bodyFont:{size:12}, callbacks:{ title:i=>labels[i[0].dataIndex], label:c=>` ${scores[c.dataIndex]}` } } },
+      plugins:{ legend:{display:false}, tooltip:{ animation:false, backgroundColor:'#111', titleFont:{size:12}, bodyFont:{size:12}, callbacks:{ title:i=>labels[i[0].dataIndex], label:c=>` ${scores[c.dataIndex]}` } } },
       scales:{
         x:{ grid:{display:isMobile,color:'#f0f0f0',lineWidth:1}, ticks:{color:'#999',font:{size:isMobile?9:10},padding:4}, border:{display:false} },
         y:{ grid:{display:!isMobile,color:'#f0f0f0',lineWidth:1}, ticks:{color:'#555',font:{size:10},maxRotation:0,padding:4}, border:{display:false} }
       }
     }
   });
-  charts.push(chart);
+  charts.set(canvasId, chart);
+  animatedCharts.add(canvasId);
 }
 
 async function loadData(){
@@ -165,12 +209,14 @@ async function loadData(){
     const resp = await fetch('/api/data', { method: 'POST' });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
-    cachedData = DISPLAY_ORDER
-      .filter(l => data.categories[l])
-      .map(l => ({ label: l, models: data.categories[l] }));
+    if (data.schemaVersion !== 2 || !Array.isArray(data.benchmarks)) throw new Error('Invalid data');
+    cachedData = data.benchmarks
+      .filter(bench => !bench.clustered && !['legacy', 'reference'].includes(bench.tier))
+      .map(bench => ({ ...bench, description: bench.key === 'overall' ? '综合加权评分，覆盖全部基准' : bench.description, models: data.categories[bench.label] || [] }));
+    document.getElementById('subtitle').textContent = `${cachedData.length} 项评测 · 每日 09:00 自动刷新`;
     render(cachedData);
   } catch (e) {
-    document.getElementById('content').innerHTML = '<div class="loading-box">数据加载失败，请稍后刷新</div>';
+    document.getElementById('content').innerHTML = '<div class="loading-box">数据尚未就绪或加载失败，请稍后刷新</div>';
   }
 }
 
@@ -178,30 +224,48 @@ function render(data){
   destroyCharts();
   const container = document.getElementById('content');
   container.innerHTML = '';
-
+  if(typeof IntersectionObserver !== 'undefined'){
+    chartObserver = new IntersectionObserver(entries => {
+      for(const entry of entries){
+        const id = entry.target.dataset.chartId;
+        if(entry.isIntersecting){
+          visibleCharts.add(id);
+          queueChart(id);
+        } else {
+          visibleCharts.delete(id);
+          releaseChart(id);
+        }
+      }
+    }, { rootMargin:'240px 0px' });
+  } else {
+    chartObserver = null;
+  }
   data.forEach((bench, idx) => {
     const id = 'chart_'+idx;
-    const section = document.createElement('div');
+    const section = document.createElement('section');
     section.className = 'chart-section';
-    const desc = DESCRIPTIONS[bench.label] || '';
+    section.dataset.chartId = id;
     const toggle = idx === 0
-      ? `<div class="theme-toggle"><button data-theme="gradient">渐变色</button><button data-theme="brand" class="active">品牌色</button></div>`
+      ? `<div class="theme-toggle"><button data-theme="gradient" class="${currentTheme === 'gradient' ? 'active' : ''}">渐变色</button><button data-theme="brand" class="${currentTheme === 'brand' ? 'active' : ''}">品牌色</button></div>`
       : '';
-    const isMobile = window.innerWidth <= 768;
-    const boxHeight = isMobile ? Math.max(400, bench.models.length * 34 + 30) : 400;
-    section.innerHTML = `${toggle}<div class="chart-title">${bench.label}</div>${desc?`<div class="chart-desc">${desc}</div>`:''}<div class="chart-box" style="height:${boxHeight}px"><canvas id="${id}"></canvas></div>`;
+    const boxHeight = window.innerWidth <= 768 ? Math.max(400, bench.models.length * 34 + 30) : 400;
+    const chart = bench.models.length
+      ? `<div class="chart-box" style="height:${boxHeight}px"><canvas id="${id}" width="0" height="0" role="img" aria-label="${escapeHtml(bench.description)}"></canvas></div>`
+      : '<div class="empty-state">暂无成绩</div>';
+    section.innerHTML = `${toggle}<h2 class="chart-title">${escapeHtml(bench.label)}</h2><p class="chart-desc">${escapeHtml(bench.description)}</p>${chart}`;
     container.appendChild(section);
-    requestAnimationFrame(() => makeChart(id, bench.models));
+    if(bench.models.length){
+      chartModels.set(id, bench.models);
+      if(chartObserver) chartObserver.observe(section);
+      else { visibleCharts.add(id); queueChart(id); }
+    }
   });
-
-  // Theme toggle binding
   container.querySelectorAll('.theme-toggle button').forEach(btn => {
     btn.addEventListener('click', () => {
+      if(currentTheme === btn.dataset.theme) return;
       currentTheme = btn.dataset.theme;
-      container.querySelectorAll('.theme-toggle button').forEach(b=>b.classList.remove('active'));
-      btn.classList.add('active');
-      destroyCharts();
-      cachedData.forEach((bench, idx) => makeChart('chart_'+idx, bench.models));
+      container.querySelectorAll('.theme-toggle button').forEach(b=>b.classList.toggle('active', b.dataset.theme === currentTheme));
+      for(const id of charts.keys()) queueChart(id);
     });
   });
 }
